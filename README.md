@@ -1,2 +1,2 @@
 # go-todo-rest-api
-A TODO REST API with golang
+First go at go
