@@ -1,26 +1,31 @@
 package main
 
 import (
+  "context"
   "encoding/json"
   "fmt"
   "github.com/pkg/errors"
+  "go.mongodb.org/mongo-driver/bson"
+  "go.mongodb.org/mongo-driver/bson/primitive"
+  "go.mongodb.org/mongo-driver/mongo"
+  "go.mongodb.org/mongo-driver/mongo/options"
   "io"
   "io/ioutil"
   "net/http"
   "os"
-  "strconv"
   "strings"
 )
 
-var todos = []Todo{
-  newTodo(1, "Go shopping"),
-  newTodo(2, "Clean room"),
-}
+const DbName = "go_todos"
+const CollectionName = "todos"
 
-var statusNames = map[TodoStatus]string{
-  NOT_STARTED: "Not started",
-  IN_PROGRESS: "In Progress",
-  DONE: "Done",
+var client *mongo.Client
+var ctx context.Context
+
+type mongoTodo struct {
+  Id primitive.ObjectID `bson:"_id"`
+  Name string `bson:"name"`
+  Status TodoStatus `bson:"status"`
 }
 
 type TodoBody struct {
@@ -35,12 +40,38 @@ func checkErr(e error) {
 }
 
 func main() {
+  connectToMongo()
   http.HandleFunc("/todo/", todoController)
   port := getPort()
 
   fmt.Println("Server listening at: ", port)
-  err := http.ListenAndServe(":" + port, nil)
+  err := http.ListenAndServe(":"+port, nil)
   checkErr(err)
+}
+
+func connectToMongo() {
+  mongoUrl := getMongoUrl()
+  var err error
+  clientOptions := options.Client().ApplyURI(mongoUrl)
+  client, err = mongo.Connect(context.TODO(), clientOptions)
+  if err != nil {
+    checkErr(err)
+  }
+  err = client.Ping(context.TODO(), nil)
+  if err != nil {
+    checkErr(err)
+  }
+
+  fmt.Println("Connected to MongoDB!")
+}
+
+func getMongoUrl() string {
+  url := os.Getenv("DB")
+  if url == "" {
+    url = "mongodb://localhost:27017"
+  }
+
+  return url
 }
 
 func getPort() string {
@@ -71,48 +102,69 @@ func todoController(w http.ResponseWriter, req *http.Request) {
 
     w.WriteHeader(http.StatusOK)
   } else if req.Method == "GET" {
-    todos := serializeTodos()
+    todos := selectTodos()
+    todosBs := serializeTodos(todos)
     w.Header().Set("Content-Type", "application/json")
-    w.Write(todos)
+    w.Write(todosBs)
   } else if req.Method == "PUT" {
     todoBS := updateTodo(w, req)
     w.Header().Set("Content-Type", "application/json")
     w.Write(todoBS)
     w.WriteHeader(http.StatusOK)
   } else if req.Method == "DELETE" {
-    id, err := getIdFromUrl(req.URL.Path)
+    err := deleteTodo(req.URL.Path)
     if err != nil {
-      http.Error(w, "Invalid todo id", http.StatusBadRequest)
+      http.Error(w, err.Error(), http.StatusInternalServerError)
       return
     }
-
-    idx := findTodoIdx(id)
-    if idx == -1 {
-      http.Error(w, "Todo does not exists", http.StatusBadRequest)
-      return
-    }
-    todos = removeElFromSlice(todos, idx)
     w.WriteHeader(http.StatusOK)
   }
 }
 
-func getIdFromUrl(path string) (int, error) {
+func deleteTodo(path string) error {
+  id := getIdFromUrl(path)
+  collection := client.Database(DbName).Collection(CollectionName)
+  objID, err := primitive.ObjectIDFromHex(id)
+  if err != nil {
+    return err
+  }
+  filter := bson.M{"_id": bson.M{"$eq": objID}}
+
+  _, err = collection.DeleteOne(ctx, filter)
+  return err
+}
+
+func selectTodos() []Todo {
+  var todos []Todo
+  collection := client.Database(DbName).Collection(CollectionName)
+  cur, err := collection.Find(ctx, bson.D{})
+  if err != nil {
+    checkErr(err)
+  }
+  defer cur.Close(ctx)
+  for cur.Next(ctx) {
+    var result mongoTodo
+    err := cur.Decode(&result)
+    if err != nil {
+      checkErr(err)
+    }
+    todo := newTodo(result.Id.Hex(), result.Name, result.Status)
+    todos = append(todos, todo)
+  }
+  if err := cur.Err(); err != nil {
+    checkErr(err)
+  }
+
+  return todos
+}
+
+func getIdFromUrl(path string) string {
   splitPath := strings.Split(path, "/")
-  id, err := strconv.Atoi(splitPath[len(splitPath) - 1])
-  return id, err
+  return splitPath[len(splitPath) - 1]
 }
 
 func updateTodo(w http.ResponseWriter, req *http.Request) []byte {
-  id, err := getIdFromUrl(req.URL.Path)
-  if err != nil {
-    http.Error(w, "Invalid todo id", http.StatusBadRequest)
-    return nil
-  }
-  idx := findTodoIdx(id)
-  if idx == -1 {
-    http.Error(w, "Todo does not exists", http.StatusBadRequest)
-    return nil
-  }
+  id := getIdFromUrl(req.URL.Path)
 
   b, err := ioutil.ReadAll(req.Body)
   if err != nil {
@@ -125,26 +177,30 @@ func updateTodo(w http.ResponseWriter, req *http.Request) []byte {
     http.Error(w, "Invalid todo update data", http.StatusBadRequest)
     return nil
   }
-  todos[idx].Name = parsedBody.Name
-  todos[idx].Status = parsedBody.Status
-  todoBS, err := serializeTodo(todos[idx])
+  collection := client.Database(DbName).Collection(CollectionName)
+  objID, err := primitive.ObjectIDFromHex(id)
+  if err != nil {
+    http.Error(w, err.Error(), http.StatusBadRequest)
+    return nil
+  }
+  filter := bson.M{"_id": bson.M{"$eq": objID}}
+  update := bson.M{"$set": bson.M{
+    "name": parsedBody.Name,
+    "status": parsedBody.Status,
+  }}
+
+  _, err = collection.UpdateOne(ctx, filter, update)
+  if err != nil {
+    http.Error(w, err.Error(), http.StatusInternalServerError)
+    return nil
+  }
+  todoBS, err := serializeTodo(newTodo(id, parsedBody.Name, parsedBody.Status))
   if err != nil {
     http.Error(w, err.Error(), http.StatusInternalServerError)
     return nil
   }
 
   return todoBS
-}
-
-func findTodoIdx(id int) int {
-  idx := -1
-  for i, todo := range todos {
-    if todo.Id == id {
-      idx = i
-    }
-  }
-
-  return idx
 }
 
 func addTodo(body io.ReadCloser) error {
@@ -156,11 +212,16 @@ func addTodo(body io.ReadCloser) error {
   if e != nil {
     return errors.New("Invalid todo data")
   }
-  todos = append(todos, newTodo(len(todos) + 1, parseBody.Name))
-  return nil
+
+  collection := client.Database(DbName).Collection(CollectionName)
+  _, err = collection.InsertOne(ctx, bson.M{
+    "name": parseBody.Name,
+    "status": parseBody.Status,
+  })
+  return err
 }
 
-func serializeTodos() []byte {
+func serializeTodos(todos []Todo) []byte {
   b, err := json.Marshal(&todos)
   checkErr(err)
 
@@ -174,9 +235,4 @@ func serializeTodo(todo Todo) ([]byte, error) {
 }
 
   return b, nil
-}
-
-func removeElFromSlice(s []Todo, i int) []Todo {
-  s[i] = s[len(s)-1]
-  return s[:len(s)-1]
 }

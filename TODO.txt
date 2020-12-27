@@ -1,0 +1,7 @@
+- Persist data mongo
+- Architecture refactors
+- Tests
+- CI/CD?
+
+
+
