@@ -9,15 +9,15 @@ const (
 )
 
 type Todo struct {
-  id int
-  name string
-  status TodoStatus
+  Id int `json:"id"`
+  Name string `json:"name"`
+  Status TodoStatus `json:"status"`
 }
 
 func newTodo(id int, name string) Todo {
   return Todo{
-    id:     id,
-    name:   name,
-    status: NOT_STARTED,
+    Id:     id,
+    Name:   name,
+    Status: NOT_STARTED,
   }
 }
