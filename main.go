@@ -79,17 +79,35 @@ func todoController(w http.ResponseWriter, req *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     w.Write(todoBS)
     w.WriteHeader(http.StatusOK)
+  } else if req.Method == "DELETE" {
+    id, err := getIdFromUrl(req.URL.Path)
+    if err != nil {
+      http.Error(w, "Invalid todo id", http.StatusBadRequest)
+      return
+    }
+
+    idx := findTodoIdx(id)
+    if idx == -1 {
+      http.Error(w, "Todo does not exists", http.StatusBadRequest)
+      return
+    }
+    todos = removeElFromSlice(todos, idx)
+    w.WriteHeader(http.StatusOK)
   }
 }
 
-func updateTodo(w http.ResponseWriter, req *http.Request) []byte {
-  splitPath := strings.Split(req.URL.Path, "/")
+func getIdFromUrl(path string) (int, error) {
+  splitPath := strings.Split(path, "/")
   id, err := strconv.Atoi(splitPath[len(splitPath) - 1])
+  return id, err
+}
+
+func updateTodo(w http.ResponseWriter, req *http.Request) []byte {
+  id, err := getIdFromUrl(req.URL.Path)
   if err != nil {
     http.Error(w, "Invalid todo id", http.StatusBadRequest)
     return nil
   }
-
   idx := findTodoIdx(id)
   if idx == -1 {
     http.Error(w, "Todo does not exists", http.StatusBadRequest)
@@ -156,4 +174,9 @@ func serializeTodo(todo Todo) ([]byte, error) {
 }
 
   return b, nil
+}
+
+func removeElFromSlice(s []Todo, i int) []Todo {
+  s[i] = s[len(s)-1]
+  return s[:len(s)-1]
 }
